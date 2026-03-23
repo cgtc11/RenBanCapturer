@@ -1,8 +1,8 @@
 <img width="978" height="369" alt="RenBansetumei1" src="https://github.com/user-attachments/assets/7524759c-22de-44dd-9a8d-ec55b8acd4c5" /></br>
 </br>
 ■取扱説明書■</br>
-指定範囲を一定間隔でキャプチャし、連番画像として保存する Windows デスクトップアプリ。</br>
-ホットキーで範囲選択と開始/停止ができる。</br>
+指定範囲を連番でキャプチャし保存する Windows デスクトップアプリ。</br>
+ショートカットでも範囲選択と開始/停止できる。</br>
 </br>
 ■動作環境■</br>
 OS: Windows 10/11</br>

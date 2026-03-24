@@ -1,3 +1,5 @@
+https://github.com/cgtc11/RenBanCapturer/releases/tag/V1.0 </br>
+</br>
 <img width="978" height="369" alt="RenBansetumei1" src="https://github.com/user-attachments/assets/7524759c-22de-44dd-9a8d-ec55b8acd4c5" /></br>
 </br>
 ■取扱説明書■</br>

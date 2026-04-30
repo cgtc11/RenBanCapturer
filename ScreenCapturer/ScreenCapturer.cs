@@ -1,8 +1,9 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -12,83 +13,129 @@ namespace RegionCapture
     {
         public string Folder;
         public string Prefix;
-        public string Extension; // "png","jpeg","tiff","bmp"
+        public string Extension;    // "png","jpeg","tiff","bmp"
         public int StartIndex;
         public int Digits;
-        public bool AddTimestamp;
-        public int JpegQuality; // 1-100
+        public bool AddTimestamp; // 既存: 壁時計を右下に焼きこむ
+        public bool BurnTimecode; // NEW : 経過タイムコードを左上に焼きこむ
+        public int JpegQuality;  // 1-100
     }
 
     public class ScreenCapturer
     {
+        // ─── タイマー精度 API ────────────────────────────────────────
+        [DllImport("winmm.dll")] private static extern uint timeBeginPeriod(uint u);
+        [DllImport("winmm.dll")] private static extern uint timeEndPeriod(uint u);
+
+        // ─── ディスク残量チェック ─────────────────────────────────────
         public static bool HasFreeDiskSpace(string folder, long requiredBytes)
         {
             try
             {
                 var root = Path.GetPathRoot(Path.GetFullPath(folder));
                 foreach (var di in DriveInfo.GetDrives())
-                {
                     if (string.Equals(di.Name, root, StringComparison.OrdinalIgnoreCase))
                         return di.AvailableFreeSpace > requiredBytes;
-                }
             }
             catch { }
             return true;
         }
 
-        public async Task StartAsync(System.Drawing.Rectangle rect, double fps, CaptureSettings settings, CancellationToken ct, Action<int, string> progress = null)
+        // ─── キャプチャメインループ ──────────────────────────────────
+        public async Task StartAsync(
+            Rectangle rect,
+            double fps,
+            CaptureSettings settings,
+            CancellationToken ct,
+            Action<int, string> progress = null)
         {
             Directory.CreateDirectory(settings.Folder);
-            var sw = new Stopwatch();
-            double frameIntervalMs = 1000.0 / Math.Max(1.0, fps);
-            int index = settings.StartIndex;
 
-            sw.Start();
-            while (!ct.IsCancellationRequested)
+            var sw = new Stopwatch();
+            double intervalMs = 1000.0 / Math.Max(1.0, fps);
+            int index = settings.StartIndex;
+            var startTime = DateTime.Now;   // タイムコード基準時刻
+
+            // ★ タイマー精度を 1ms に設定（デフォルト ~15ms → 累積ズレ解消）
+            timeBeginPeriod(1);
+            try
             {
-                string path = NextPath(settings, index);
-                using (var bmp = new Bitmap(rect.Width, rect.Height, PixelFormat.Format32bppArgb))
+                sw.Start();
+                while (!ct.IsCancellationRequested)
                 {
-                    using (var g = Graphics.FromImage(bmp))
+                    string path = NextPath(settings, index);
+
+                    using (var bmp = new Bitmap(rect.Width, rect.Height, PixelFormat.Format32bppArgb))
                     {
-                        g.CopyFromScreen(rect.Location, System.Drawing.Point.Empty, rect.Size, CopyPixelOperation.SourceCopy);
-                        if (settings.AddTimestamp)
+                        using (var g = Graphics.FromImage(bmp))
                         {
-                            using (var br = new SolidBrush(Color.FromArgb(200, Color.Black)))
-                            using (var br2 = new SolidBrush(Color.White))
-                            using (var f = new Font("Segoe UI", 12, FontStyle.Bold))
+                            g.CopyFromScreen(rect.Location, Point.Empty, rect.Size, CopyPixelOperation.SourceCopy);
+
+                            // 既存: 壁時計タイムスタンプ（右下）
+                            if (settings.AddTimestamp)
                             {
-                                string t = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-                                var sz = g.MeasureString(t, f);
-                                var p = new System.Drawing.PointF(bmp.Width - sz.Width - 8, bmp.Height - sz.Height - 6);
-                                g.FillRectangle(br, p.X - 4, p.Y - 2, sz.Width + 8, sz.Height + 4);
-                                g.DrawString(t, f, br2, p);
+                                using (var bgBr = new SolidBrush(Color.FromArgb(200, Color.Black)))
+                                using (var fgBr = new SolidBrush(Color.White))
+                                using (var f = new Font("Segoe UI", 12, FontStyle.Bold))
+                                {
+                                    string t = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                                    var sz = g.MeasureString(t, f);
+                                    var p = new PointF(bmp.Width - sz.Width - 8, bmp.Height - sz.Height - 6);
+                                    g.FillRectangle(bgBr, p.X - 4, p.Y - 2, sz.Width + 8, sz.Height + 4);
+                                    g.DrawString(t, f, fgBr, p);
+                                }
+                            }
+
+                            // ★ NEW: 経過タイムコード焼きこみ（左上・小さく）
+                            // 形式: HH:MM:SS:FF  #0042
+                            if (settings.BurnTimecode)
+                            {
+                                var elapsed = DateTime.Now - startTime;
+                                int ff = (int)(elapsed.TotalSeconds * fps) % (int)Math.Max(1.0, fps);
+                                string num = index.ToString().PadLeft(settings.Digits, '0');
+                                string tc = $"{(int)elapsed.TotalHours:00}:{elapsed.Minutes:00}:{elapsed.Seconds:00}:{ff:00}  #{num}";
+
+                                using (var font = new Font("Consolas", 9, FontStyle.Regular))
+                                using (var bgBr = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
+                                using (var fgBr = new SolidBrush(Color.FromArgb(255, 0, 230, 100)))
+                                {
+                                    var sz = g.MeasureString(tc, font);
+                                    g.FillRectangle(bgBr, 4, 4, sz.Width + 8, sz.Height + 4);
+                                    g.DrawString(tc, font, fgBr, 8, 6);
+                                }
                             }
                         }
+                        SaveBitmap(bmp, path, settings);
                     }
-                    SaveBitmap(bmp, path, settings);
+
+                    progress?.Invoke(index, path);
+                    index++;
+
+                    // 次フレームまでの正確な待機
+                    double elapsed2 = sw.Elapsed.TotalMilliseconds;
+                    double next = Math.Ceiling(elapsed2 / intervalMs) * intervalMs;
+                    int delay = (int)Math.Max(0, next - elapsed2);
+                    await Task.Delay(delay, ct).ConfigureAwait(false);
                 }
-
-                progress?.Invoke(index, path);
-                index++;
-
-                double elapsed = sw.Elapsed.TotalMilliseconds;
-                double next = Math.Ceiling(elapsed / frameIntervalMs) * frameIntervalMs;
-                int delay = (int)Math.Max(0, next - elapsed);
-                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                timeEndPeriod(1); // ★ 必ず元に戻す
             }
 
             ct.ThrowIfCancellationRequested();
         }
 
+        // ─── ファイルパス生成 ─────────────────────────────────────────
         private static string NextPath(CaptureSettings s, int index)
         {
+            // ファイル名は常に Prefix + 連番 のみ。タイムスタンプはファイル名に付けない。
             string num = index.ToString(new string('0', s.Digits));
-            string ts = s.AddTimestamp ? "_" + DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") : "";
-            string name = $"{s.Prefix}{num}{ts}.{s.Extension}";
+            string name = $"{s.Prefix}{num}.{s.Extension}";
             return Path.Combine(s.Folder, name);
         }
 
+        // ─── 画像保存 ──────────────────────────────────────────────────
         private static void SaveBitmap(Bitmap bmp, string path, CaptureSettings s)
         {
             switch (s.Extension.ToLower())
@@ -96,19 +143,25 @@ namespace RegionCapture
                 case "png":
                     bmp.Save(path, ImageFormat.Png);
                     break;
+
                 case "jpeg":
                 case "jpg":
                     var enc = GetEncoder(ImageFormat.Jpeg);
                     var eps = new EncoderParameters(1);
-                    eps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, (long)Math.Max(1, Math.Min(100, s.JpegQuality)));
+                    eps.Param[0] = new EncoderParameter(
+                        System.Drawing.Imaging.Encoder.Quality,
+                        (long)Math.Max(1, Math.Min(100, s.JpegQuality)));
                     bmp.Save(path, enc, eps);
                     break;
+
                 case "tiff":
                     bmp.Save(path, ImageFormat.Tiff);
                     break;
+
                 case "bmp":
                     bmp.Save(path, ImageFormat.Bmp);
                     break;
+
                 default:
                     bmp.Save(path, ImageFormat.Png);
                     break;
@@ -118,7 +171,8 @@ namespace RegionCapture
         private static ImageCodecInfo GetEncoder(ImageFormat format)
         {
             var codecs = ImageCodecInfo.GetImageDecoders();
-            foreach (var c in codecs) if (c.FormatID == format.Guid) return c;
+            foreach (var c in codecs)
+                if (c.FormatID == format.Guid) return c;
             return null;
         }
     }

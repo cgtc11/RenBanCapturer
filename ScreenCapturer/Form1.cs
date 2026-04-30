@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Drawing;
 using System.IO;
 using System.Threading;
@@ -16,6 +16,7 @@ namespace RegionCapture
         private Rectangle _captureRect = Rectangle.Empty;
         private CancellationTokenSource _cts;
         private CancellationTokenSource _autoCts;
+        private System.Windows.Forms.Timer _regionFlashTimer;  // 数値変更後デバウンス用
 
         public MainForm()
         {
@@ -23,7 +24,7 @@ namespace RegionCapture
 
             // 既定値
             cmbFormat.SelectedIndex = 0;   // PNG
-            numFps.Value = 24;             // ★24FPSに変更
+            numFps.Value = 24;  // ★24FPS
             numDigits.Value = 4;
             numStart.Value = 1;
             txtPrefix.Text = "capture_";
@@ -39,6 +40,9 @@ namespace RegionCapture
             numAutoSec.Minimum = 0.1M;
             numAutoSec.Maximum = 59.9M;
             numAutoSec.Value = 30.0M;
+
+            // ★ BurnTimecode 既定OFF
+            chkBurnTimecode.Checked = false;
 
             // ホットキー
             _hotkeySelect = new Hotkey(this, ModKeys.None, Keys.F8);
@@ -58,10 +62,33 @@ namespace RegionCapture
             }
             catch { }
 
+            // 数値入力変更時のデバウンスタイマー（400ms後にフラッシュ）
+            _regionFlashTimer = new System.Windows.Forms.Timer { Interval = 400 };
+            _regionFlashTimer.Tick += (s, e) =>
+            {
+                _regionFlashTimer.Stop();
+                if (_cts != null) return; // 録画中は無視
+                if (!TryApplyRegionFromInputs()) return;
+                UpdateRegionLabel();
+                UpdateUiState();
+                FlashRegion(_captureRect);
+            };
+            numX.ValueChanged += OnRegionInputChanged;
+            numY.ValueChanged += OnRegionInputChanged;
+            numW.ValueChanged += OnRegionInputChanged;
+            numH.ValueChanged += OnRegionInputChanged;
+
             UpdateUiState();
         }
 
-        // UIイベント
+        // ─── UIイベント ────────────────────────────────────────────────
+        private void OnRegionInputChanged(object sender, EventArgs e)
+        {
+            if (_cts != null) return; // 録画中は変更不可なので無視
+            _regionFlashTimer.Stop();
+            _regionFlashTimer.Start(); // リセットして再スタート（デバウンス）
+        }
+
         private void btnSelectRegion_Click(object sender, EventArgs e) => SelectRegion();
         private async void btnStart_Click(object sender, EventArgs e) => await StartCaptureAsync();
         private async void btnStop_Click(object sender, EventArgs e) => await StopCaptureAsync();
@@ -79,7 +106,8 @@ namespace RegionCapture
 
         private void cmbFormat_SelectedIndexChanged(object sender, EventArgs e)
         {
-            bool isJpeg = string.Equals((string)cmbFormat.SelectedItem, "JPEG", StringComparison.OrdinalIgnoreCase);
+            bool isJpeg = string.Equals((string)cmbFormat.SelectedItem, "JPEG",
+                StringComparison.OrdinalIgnoreCase);
             numJpegQ.Enabled = isJpeg;
             lblJpegQ.Enabled = isJpeg;
         }
@@ -96,13 +124,12 @@ namespace RegionCapture
             if (!TryApplyRegionFromInputs()) return;
             UpdateRegionLabel();
             UpdateUiState();
-            FlashRegion(_captureRect); // 1秒ハイライト
+            FlashRegion(_captureRect);
         }
 
-        // 範囲選択
+        // ─── 範囲選択 ──────────────────────────────────────────────────
         private void SelectRegion()
         {
-            // 範囲指定時バックアップ
             try
             {
                 if (!string.IsNullOrWhiteSpace(txtFolder.Text))
@@ -125,17 +152,17 @@ namespace RegionCapture
             UpdateUiState();
         }
 
-        // 録画開始
+        // ─── 録画開始 ──────────────────────────────────────────────────
         private async Task StartCaptureAsync()
         {
             if (_cts != null) return;
 
-            // 数値入力→範囲
             TryApplyRegionFromInputs();
 
             if (_captureRect.Width < 2 || _captureRect.Height < 2)
             {
-                MessageBox.Show(this, "キャプチャ範囲を指定してください（F8 または 数値入力→[範囲適用]）。",
+                MessageBox.Show(this,
+                    "キャプチャ範囲を指定してください（F8 または 数値入力→[範囲適用]）。",
                     "範囲未指定", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -147,7 +174,6 @@ namespace RegionCapture
             }
             Directory.CreateDirectory(txtFolder.Text);
 
-            // 録画前バックアップ
             try { BackupExistingFiles(txtFolder.Text); } catch { }
 
             var fmtSel = (string)cmbFormat.SelectedItem;
@@ -155,10 +181,11 @@ namespace RegionCapture
             {
                 Folder = txtFolder.Text,
                 Prefix = txtPrefix.Text,
-                Extension = fmtSel.ToLower(),   // png/jpeg/tiff/bmp
+                Extension = fmtSel.ToLower(),
                 StartIndex = (int)numStart.Value,
                 Digits = (int)numDigits.Value,
                 AddTimestamp = chkTimestamp.Checked,
+                BurnTimecode = chkBurnTimecode.Checked,   // ★ NEW
                 JpegQuality = (int)numJpegQ.Value
             };
 
@@ -179,21 +206,21 @@ namespace RegionCapture
             try
             {
                 lblStatus.Text = "状態: 取得中";
-                await _capturer.StartAsync(_captureRect, fps, settings, _cts.Token, progress: (i, path) =>
-                {
-                    if (IsHandleCreated)
+                await _capturer.StartAsync(_captureRect, fps, settings, _cts.Token,
+                    progress: (i, path) =>
                     {
-                        BeginInvoke((Action)(() =>
-                        {
-                            lblStatus.Text = $"状態: 取得中  #{i}  {Path.GetFileName(path)}";
-                        }));
-                    }
-                });
+                        if (IsHandleCreated)
+                            BeginInvoke((Action)(() =>
+                            {
+                                lblStatus.Text = $"状態: 取得中  #{i}  {Path.GetFileName(path)}";
+                            }));
+                    });
             }
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.ToString(), "エラー", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(this, ex.ToString(), "エラー",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
             {
@@ -201,7 +228,7 @@ namespace RegionCapture
             }
         }
 
-        // 自動停止タイマー
+        // ─── 自動停止タイマー ─────────────────────────────────────────
         private void SetupAutoStopTimer()
         {
             try { _autoCts?.Cancel(); } catch { }
@@ -222,13 +249,14 @@ namespace RegionCapture
                 {
                     await Task.Delay(TimeSpan.FromSeconds(totalSec), token);
                     if (token.IsCancellationRequested) return;
-                    if (_cts != null) BeginInvoke((Action)(async () => { await StopCaptureAsync(); }));
+                    if (_cts != null)
+                        BeginInvoke((Action)(async () => { await StopCaptureAsync(); }));
                 }
                 catch { }
             }, token);
         }
 
-        // 録画停止
+        // ─── 録画停止 ──────────────────────────────────────────────────
         private async Task StopCaptureAsync()
         {
             var auto = Interlocked.Exchange(ref _autoCts, null);
@@ -247,14 +275,14 @@ namespace RegionCapture
             UpdateUiState();
         }
 
-        // 範囲の一時ハイライト
+        // ─── 範囲ハイライト ────────────────────────────────────────────
         private void FlashRegion(Rectangle r)
         {
             var overlay = new FlashOverlay(r, 1000);
             overlay.Show();
         }
 
-        // 数値入力→範囲
+        // ─── 数値入力 → 範囲 ──────────────────────────────────────────
         private bool TryApplyRegionFromInputs()
         {
             try
@@ -280,7 +308,7 @@ namespace RegionCapture
             catch { return false; }
         }
 
-        // 範囲→数値入力
+        // ─── 範囲 → 数値入力 ──────────────────────────────────────────
         private void UpdateRegionInputsFromRect()
         {
             numX.Value = Math.Max(numX.Minimum, Math.Min(numX.Maximum, _captureRect.X));
@@ -292,10 +320,11 @@ namespace RegionCapture
         private void UpdateRegionLabel()
         {
             lblRegion.Text = (_captureRect.Width > 0 && _captureRect.Height > 0)
-                ? $"領域: X={_captureRect.X}, Y={_captureRect.Y}, W={_captureRect.Width}, H={_captureRect.Height}"
+                ? $"X={_captureRect.X}  Y={_captureRect.Y}  W={_captureRect.Width}  H={_captureRect.Height}"
                 : "未選択";
         }
 
+        // ─── UI 有効/無効 ──────────────────────────────────────────────
         private void UpdateUiState()
         {
             bool running = _cts != null;
@@ -310,7 +339,9 @@ namespace RegionCapture
             numDigits.Enabled = !running;
             numStart.Enabled = !running;
             chkTimestamp.Enabled = !running;
-            numJpegQ.Enabled = !running && string.Equals((string)cmbFormat.SelectedItem, "JPEG", StringComparison.OrdinalIgnoreCase);
+            chkBurnTimecode.Enabled = !running;   // ★ NEW
+            numJpegQ.Enabled = !running && string.Equals(
+                (string)cmbFormat.SelectedItem, "JPEG", StringComparison.OrdinalIgnoreCase);
 
             chkAutoStop.Enabled = !running;
             numAutoMin.Enabled = !running && chkAutoStop.Checked;
@@ -318,12 +349,14 @@ namespace RegionCapture
 
             btnApplyRegion.Enabled = !running;
 
-            lblRegion.ForeColor = (_captureRect.Width > 0 && _captureRect.Height > 0)
-                ? System.Drawing.Color.DarkGreen
-                : System.Drawing.Color.DarkRed;
+            // 領域ラベル色
+            bool hasRegion = _captureRect.Width > 0 && _captureRect.Height > 0;
+            lblRegion.ForeColor = hasRegion
+                ? Color.FromArgb(0, 210, 110)
+                : Color.FromArgb(220, 80, 80);
         }
 
-        // 偶数幅・高さに丸める
+        // ─── 偶数サイズ強制 ────────────────────────────────────────────
         private static Rectangle MakeEvenRect(Rectangle r)
         {
             int w = (r.Width & ~1);
@@ -333,7 +366,7 @@ namespace RegionCapture
             return new Rectangle(r.X, r.Y, w, h);
         }
 
-        // バックアップ（ファイルのみ）
+        // ─── バックアップ ──────────────────────────────────────────────
         private static void BackupExistingFiles(string folder)
         {
             if (!Directory.Exists(folder)) return;
